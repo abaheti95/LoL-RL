@@ -1,0 +1,14 @@
+torch
+transformers
+numpy
+pandas
+tqdm
+scikit-learn
+scipy
+matplotlib
+seaborn
+names
+ftfy
+numba
+sentence_transformers
+datasets
