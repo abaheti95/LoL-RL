@@ -1,12 +1,20 @@
 # Left-over Lunch Reinforcement Learning (LoL-RL)
 Improving Language Models with Advantage-based Offline Policy Gradients. 
 
-TODO update link [paper]()
-
-Install Packages: `pip install -r requirements.txt`
-
+paper: https://arxiv.org/abs/2305.14718
+```
+@misc{baheti2023improving,
+      title={Improving Language Models with Advantage-based Offline Policy Gradients}, 
+      author={Ashutosh Baheti and Ximing Lu and Faeze Brahman and Ronan Le Bras and Maarten Sap and Mark Riedl},
+      year={2023},
+      eprint={2305.14718},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL}
+}
+```
 
 ## Experiments
+Install Packages: `pip install -r requirements.txt`
 
 ### 1 IMDB Positive Sentiment Continuation
 
