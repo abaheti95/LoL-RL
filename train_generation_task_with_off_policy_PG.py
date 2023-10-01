@@ -1,7 +1,6 @@
 # We will create a generalized recipe for off-policy PG training while comparing with standard Supervised Learning (SL) training.
 
-from utils.utils import RANDOM_SEED, log_list, print_list, make_dir_if_not_exists, save_in_pickle, load_from_pickle, save_in_json, load_from_json, format_time, plot_train_loss, log_TP_FP_FN_TN_from_binary_predictions, save_list_of_tuples_to_tsv, load_from_tsv_to_list_of_list, save_in_jsonl, load_from_jsonl, reduce_mean
-import pdb
+from utils.utils import RANDOM_SEED, log_list, make_dir_if_not_exists, load_from_pickle, format_time, save_in_jsonl, load_from_jsonl, reduce_mean, get_ngrams_from_sentence, save_in_pickle
 
 from transformers import GPT2Tokenizer, AutoConfig, AdamW, get_linear_schedule_with_warmup, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, RobertaPreTrainedModel, AutoModelForSequenceClassification, pipeline, AutoModelForSeq2SeqLM, RobertaModel
 from sentence_transformers import SentenceTransformer, util
@@ -10,10 +9,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch import autograd
 import torch
-torch.manual_seed(RANDOM_SEED+1)
 
 import random
-random.seed(RANDOM_SEED)
 
 import os
 import re
@@ -43,15 +40,17 @@ parser.add_argument("-i", "--input_dir", help="Directory containing train, dev a
 parser.add_argument("-tn", "--task_name", help="Name of the RL4LMs task useful to keep track of reward functions", type=str, required=True)
 parser.add_argument("-s", "--save_dir", help="Path to the directory where we will save model and the tokenizer", type=str, required=True)
 parser.add_argument("-o", "--output_dir", help="Path to the output directory where we will save all the model prediction and results", type=str, required=True)
+parser.add_argument("-cd", "--cache_dir", help="Path to the cache directory where we will save the pretrained models", type=str, default=None)
 
 # Argument regarding learning algorithm
 # parser.add_argument("-bom", "--baseline_offensive_model_dir", help="Path to the directory containing the baseline supervised learning method", type=str, required=True)
 parser.add_argument("-m", "--model_name", help="Name of the model to be saved", type=str, required=True)
 parser.add_argument("-mt", "--model_tokenizer", help="Directory containing COMET-distill tokenizer", type=str, default=None)
-parser.add_argument("-algo", "--learning_algorithm", help="Which type of to include reward in learning", type=str, default="nll", choices=["nll", "pg", "offline_pg", "offline_a2c", "offline_pg_seq", "offline_a2c_seq"])
+parser.add_argument("-algo", "--learning_algorithm", help="Which type of to include reward in learning", type=str, default="nll", choices=["nll", "wbc", "r_gold", "r_lol",  "a_lol", "a_lol_ref_free", "a_lol_seq", "a_lol_kl"])
 parser.add_argument("-a2c_n", "--a2c_n_value_head_epochs", help="Number of epochs to train the value head in A2C", type=int, default=5)
 parser.add_argument("-r", "--reward_function", help="What reward to use in learning", type=str, default="unit", choices=["unit", "diff_from_goal", "true_prob"])
 parser.add_argument("-c", "--ppo_clip", help="PPO clip parameter value. If given the clipped version of importance sampling will be used", type=float, default=None)
+parser.add_argument("-b", "--kl_beta", help="KL beta parameter value. If given the KL divergence will be used in importance sampling", type=float, default=None)
 parser.add_argument("-ts", "--train_sampling", help="Whether to use reward/advantage sampling during training", action="store_true")
 parser.add_argument("-but", "--baseline_update_threshold", help="Update the baseline if new validation is greater than baseline validation + threshold", type=float, default=None)
 
@@ -75,6 +74,7 @@ parser.add_argument("-vf", "--val_log_frequency", help="How many times should we
 parser.add_argument("-e", "--n_epochs", help="Number of epochs", type=int, default=4)
 parser.add_argument("-lr", "--learning_rate", help="Number of epochs", type=float, default=2e-5)
 parser.add_argument("-ml", "--max_resp_length", help="Maximum length of the input sequence", type=int, default=128)
+parser.add_argument("-seed", "--seed", help="Random seed", type=int, default=RANDOM_SEED)
 args = parser.parse_args()
 
 import logging
@@ -93,6 +93,10 @@ else:
     logfile = os.path.join(args.output_dir, "output.log")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=[logging.FileHandler(logfile, mode='w'), logging.StreamHandler()])
 
+torch.manual_seed(args.seed+1)
+random.seed(args.seed)
+logging.info(f"Using random seed {args.seed}")
+
 # Save the copy of arguments in the save directory
 import json
 with open(os.path.join(args.output_dir, 'args.json'), 'w') as f:
@@ -105,11 +109,23 @@ MAX_RESP_LENGTH = 128
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 logging.info(f"Using {device} to train")
 
-from utils.rl_utils import ValueHeadMLP, LanguageGenerationListofDict, LanguageGenerationCollator, get_model_predictions, train_value_function_on_val_predictions, get_advantage_predictions_on_dataset
+from utils.rl_utils import ValueHeadAttention, LanguageGenerationListofDict, LanguageGenerationCollator, get_model_predictions, train_value_function_on_val_predictions, get_advantage_predictions_on_dataset
 
 # Used to calculate val and test perplexity for DialyDialog evaluation
 from utils.attributes_utils import get_batched_dialog_loss, GPT2ForOC_S_offensive
 from utils.comet_utils import RobertaClassificationHead, get_period_stopping_critera
+
+def calculate_distinct_ngram_metrics(responses):
+    all_unigrams = [ngram for response in responses for ngram in get_ngrams_from_sentence(response, 1)]
+    unique_unigrams = set(all_unigrams)
+    unigram_ratio = len(unique_unigrams)/len(all_unigrams)
+    all_bigrams = [ngram for response in responses for ngram in get_ngrams_from_sentence(response, 2)]
+    unique_bigrams = set(all_bigrams)
+    bigram_ratio = len(unique_bigrams)/len(all_bigrams)
+    all_trigrams = [ngram for response in responses for ngram in get_ngrams_from_sentence(response, 3)]
+    unique_trigrams = set(all_trigrams)
+    trigram_ratio = len(unique_trigrams)/len(all_trigrams)
+    return unigram_ratio, bigram_ratio, trigram_ratio
 
 def main():
     args.device = device
@@ -117,7 +133,7 @@ def main():
     logging.info(f"Loading the dataset from {args.input_dir}")
     start_time = time()
     # TEMP: Smaller number of instances for debugging
-    # max_lines = 1000
+    # max_lines = 100
     max_lines = None
     if args.task_name == "reddit_pos":
         train_file = os.path.join(args.input_dir, "pos_train.jsonl")
@@ -136,12 +152,12 @@ def main():
     logging.info(f"Loaded the val dataset from {val_file} with {len(val_data)} instances")
     if args.task_name == "COMET":
         # Reduce val data to 10000 instances
-        val_data = random.sample(val_data, 10000)
+        val_data = random.sample(val_data, min(10000, len(val_data)))
         logging.info(f"[IMPORTANT] Reduced the val dataset to {len(val_data)} instances for COMET")
     # TEMP: Smaller number of instances for debugging
     # val_data = val_data[:100]
     # train_data = train_data[:1000]
-    if args.task_name == "WOW":
+    if args.task_name == "wow":
         test_file = os.path.join(args.input_dir, "faithdial_test.jsonl")
     else:
         test_file = os.path.join(args.input_dir, "test.jsonl")
@@ -304,7 +320,7 @@ def main():
         reward_args["offensive_model"] = offensive_model
         reward_args["offensive_tokenizer"] = offensive_tokenizer
 
-    if args.task_name in ["WOW", "reddit_pos", "reddit_neg"]:
+    if args.task_name in ["wow", "faithdial", "faithdial_wow", "reddit_pos", "reddit_neg"]:
         logging.info(f"Loading tf-idf scores for all train responses for task = {args.task_name}")
         # Load the tfidf_transformer and cv
         tfidf_transformer_save_file = os.path.join(args.input_dir, "tfidf_transformer.pkl")
@@ -335,7 +351,7 @@ def main():
             # Resize model embeddings to match the new vocabulary size
             model.resize_token_embeddings(len(tokenizer))
         logging.info(f"Loaded model in {time() - start_time:.2f} seconds")
-        if args.learning_algorithm.startswith("offline_"):
+        if args.learning_algorithm in ["r_lol", "a_lol", "a_lol_seq", "a_lol_ref_free", "a_lol_kl"]:
             # Also create a baseline model
             logging.info(f"Also creating a baseline model from {args.model_name}")
             baseline_model = AutoModelLM.from_pretrained(args.model_name, config=config).to(device)
@@ -343,7 +359,7 @@ def main():
                 # Resize model embeddings to match the new vocabulary size
                 baseline_model.resize_token_embeddings(len(tokenizer))
             baseline_model.eval()
-            if args.learning_algorithm == "offline_a2c":
+            if args.learning_algorithm in ["a_lol_seq", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
                 # Also initialize an external value function estimator for A2C
                 logging.info(f"Also creating a value function estimator for the model {args.model_name}")
                 # Change the max_value to task specific
@@ -351,14 +367,14 @@ def main():
                     args.max_value = 1.0
                 elif args.task_name in ["Xsum", "CNNDailyMail", "IMDBForSeq2Seq", "DailyDialog"]:
                     args.max_value = 2.0
-                elif args.task_name in ["WOW"]:
+                elif args.task_name in ["wow", "faithdial", "faithdial_wow"]:
                     args.max_value = 4.0
                 elif args.task_name in ["reddit_pos", "reddit_neg"]:
                     args.max_value = 5.0
                 else:
                     logging.error(f"Task {args.task_name} not yet defined for value function estimator")
                     breakpoint()
-                value_function_estimator = ValueHeadMLP(config, max_value=args.max_value).to(device)
+                value_function_estimator = ValueHeadAttention(config, max_value=args.max_value).to(device)
 
     else:
         # Load from a previously trained model
@@ -366,7 +382,7 @@ def main():
         model = AutoModelLM.from_pretrained(args.save_dir, config=config).to(device)
         # tokenizer = AutoTokenizer.from_pretrained(args.save_dir)
     
-    if args.baseline_update_threshold is not None or args.learning_algorithm == "offline_a2c":
+    if args.baseline_update_threshold is not None or args.learning_algorithm in ["a_lol_seq", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
         # Eval in beginning should be true to get baseline model performance
         assert args.eval_in_beginning, breakpoint()
     baseline_success_measure = None
@@ -376,15 +392,15 @@ def main():
         args.success_measure_str = "COMET Critic Score"
     elif args.task_name == "DailyDialog":
         args.success_measure_str = "-ve perplexity"
-    elif args.task_name in ["reddit_pos", "reddit_neg"]:
+    elif args.task_name in ["reddit_pos", "reddit_neg", "faithdial"]:
         args.success_measure_str = "Final reward"
-    elif args.task_name == "WOW":
+    elif args.task_name in ["wow", "faithdial_wow"]:
         args.success_measure_str = "FaithDial Critic Score"
     else:
         args.success_measure_str = "Meteor Score"
     if args.eval_in_beginning:
         logging.info(f"############## Running Validation before training...")
-        if args.learning_algorithm in ["nll", "pg"]: baseline_model = model
+        if args.learning_algorithm in ["nll", "wbc", "r_gold"]: baseline_model = model
         # Make predictions on val set
         all_ids, all_gen_responses, all_val_responses, all_gen_rewards, all_gold_rewards, meteor_score = get_model_predictions(val_dataloader, baseline_model, tokenizer, device, reward_args, args)
         # Get per reward average
@@ -397,9 +413,9 @@ def main():
             best_success_measure = gen_reward_avg["sentiment"]
         elif args.task_name == "COMET":
             best_success_measure = gen_reward_avg["p_valid_model"]
-        elif args.task_name in ["reddit_pos", "reddit_neg"]:
+        elif args.task_name in ["reddit_pos", "reddit_neg", "faithdial"]:
             best_success_measure = gen_reward_avg["final_reward"]
-        elif args.task_name == "WOW":
+        elif args.task_name in ["wow", "faithdial_wow"]:
             best_success_measure = gen_reward_avg["faithdial"]
         elif args.task_name == "DailyDialog":
             # Calculate model perplexity on val set
@@ -414,12 +430,24 @@ def main():
         if args.baseline_update_threshold is not None:
             logging.info(f"Also setting the baseline model {args.success_measure_str} to {best_success_measure} since we are using baseline update threshold of {args.baseline_update_threshold}")
             baseline_success_measure = best_success_measure
-        if args.learning_algorithm == "offline_a2c":
-            # Estimate the value function on the dev predictions of baseline model
-            logging.info(f"Also estimating the value function on the initial dev predictions of baseline model")
-            best_value_function_model, best_value_mse, best_epoch = train_value_function_on_val_predictions(value_function_estimator, baseline_model, tokenizer, val_dataloader, all_ids, all_gen_responses, all_gen_rewards, args)
-            best_value_function_model.eval()
-            logging.info(f"Best value function model MSE: {best_value_mse} at val epoch {best_epoch}")
+        if args.learning_algorithm in ["a_lol_seq", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
+            make_dir_if_not_exists(args.cache_dir)
+            val_model_save_path = os.path.join(args.cache_dir, "best_value_function_model.pt")
+            recompute_val = False
+            if os.path.exists(val_model_save_path) and not recompute_val:
+                logging.info(f"Loading the best value function model from {val_model_save_path}")
+                value_function_estimator.load_state_dict(torch.load(val_model_save_path))
+                best_value_function_model = value_function_estimator
+                logging.info(f"Loaded the best value function model from {val_model_save_path}")
+            else:
+                # Estimate the value function on the dev predictions of baseline model and save in args.save_dir
+                logging.info(f"Also estimating the value function on the initial dev predictions of baseline model")
+                best_value_function_model, best_value_mse, best_epoch = train_value_function_on_val_predictions(value_function_estimator, baseline_model, tokenizer, val_dataloader, all_ids, all_gen_responses, all_gen_rewards, args)
+                best_value_function_model.eval()
+                logging.info(f"Best value function model MSE: {best_value_mse} at val epoch {best_epoch}")
+                # Save the best_value_function_model
+                torch.save(best_value_function_model.state_dict(), val_model_save_path)
+                logging.info(f"Saved the best value function model in {val_model_save_path}")
             
 
     else:
@@ -436,19 +464,43 @@ def main():
         epochs = args.n_epochs
         # Add sampling weights right before training
         if args.train_sampling:
-            if args.learning_algorithm in ["pg", "offline_pg_seq"]:
+            if args.learning_algorithm in ["wbc", "r_gold", "r_lol"]:
                 if args.task_name in ["Xsum", "CNNDailyMail"]:
                     # NOTE: not using doc_nli reward right now. For CNN the doc_nli reward is mostly close to 0.
                     train_rewards = [datum['reward_components']['fluency'] + datum['reward_components']['text_sim'] for datum in train_dataset]
                     # rewards = [datum['reward_components']['fluency'] + datum['reward_components']['text_sim'] + datum['reward_components']['doc_nli_score'] for datum in batch]
-                elif args.task_name in ["IWSLT2017EnDe", "IMDBForSeq2Seq", "DailyDialog", "COMET", "WOW", "reddit_pos", "reddit_neg"]:
+                elif args.task_name in ["IWSLT2017EnDe", "IMDBForSeq2Seq", "DailyDialog", "COMET", "wow", "faithdial", "faithdial_wow", "reddit_pos", "reddit_neg"]:
                     train_rewards = [datum['reward_components']['final_reward'] for datum in train_dataset]
                 train_rewards = np.array(train_rewards)
                 train_dataset.set_sample_weights(train_rewards)
                 logging.info(f"Using train_rewards for sampling instead of random sampling")
                 total_steps = len(train_dataloader) * epochs
-            elif args.learning_algorithm == "offline_a2c":
-                all_advantages = get_advantage_predictions_on_dataset(train_dataset, tokenize_collator, baseline_model, best_value_function_model, args)
+            elif args.learning_algorithm in ["a_lol_seq", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
+                train_advantage_cache_file = os.path.join(args.cache_dir, "train_advantage_cache.pkl")
+                recompute_adv = False
+                if os.path.exists(train_advantage_cache_file) and not recompute_adv:
+                    logging.info(f"Loading the train advantage predictions from {train_advantage_cache_file}")
+                    all_advantages = load_from_pickle(train_advantage_cache_file)
+                    logging.info(f"Loaded {len(all_advantages)} train advantage predictions from {train_advantage_cache_file}")
+                else:
+                    logging.info(f"Computing the train advantage predictions")
+                    all_advantages = get_advantage_predictions_on_dataset(train_dataset, tokenize_collator, baseline_model, best_value_function_model, args)
+                    logging.info(f"Computed {len(all_advantages)} train advantage predictions")
+                    # Save the advantage predictions
+                    save_in_pickle(all_advantages, train_advantage_cache_file)
+                    logging.info(f"Saved {len(all_advantages)} train advantage predictions in {train_advantage_cache_file}")
+                # Create empty advantage stats jsonl file
+                advantage_stats_file = os.path.join(args.output_dir, "advantage_stats.jsonl")
+                open(advantage_stats_file, "w").close()
+                all_advantages = np.array(all_advantages)
+                # get mean, median, std, min, max of advantage
+                advantage_stats = {"mean": np.mean(all_advantages), "median": np.median(all_advantages), "std": np.std(all_advantages), "min": np.min(all_advantages), "max": np.max(all_advantages)}
+                # also get the 10 bucket percentiles of advantage
+                percentile_10 = [np.percentile(all_advantages, i) for i in range(0, 101, 10)]
+                advantage_stats["percentile_10"] = percentile_10
+                # Save the advantage stats to file
+                save_in_jsonl([advantage_stats], advantage_stats_file, append=True)
+                
                 # Find ratio of instances with negative advantage
                 num_instances_with_negative_advantage = len([e for e in all_advantages if e < 0])
                 ratio = num_instances_with_negative_advantage / len(all_advantages)
@@ -459,6 +511,7 @@ def main():
                 logging.info(f"Using positive advantages for sampling instead of random sampling")
                 # Also change the len(train_dataloader) to len(train_dataloader) * (1-ratio)
                 total_steps = int(len(train_dataloader) * epochs * (1-ratio))
+
         else:
             total_steps = len(train_dataloader) * epochs
         # Start training
@@ -519,9 +572,11 @@ def main():
 
             val_log_frequency = args.val_log_frequency
             n_steps = len(train_dataloader)
-            if args.train_sampling and args.learning_algorithm == "offline_a2c":
+            if args.train_sampling and args.learning_algorithm in ["a_lol_seq", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
                 # NOTE: We are sampling from the train dataset instead of random sampling
+                logging.info(f"Reducing the number of steps to {n_steps} by ratio {1 - ratio}")
                 n_steps = int(n_steps * (1-ratio))
+                logging.info(f"Updated number of steps to {n_steps}")
             val_steps = int(n_steps / val_log_frequency)
             current_epoch_loss_trajectories = defaultdict(list)
             for step, batch in enumerate(pbar):
@@ -554,14 +609,30 @@ def main():
                 # labels is of the shape [batch_size, seq_len]
                 log_probs = F.log_softmax(logits, dim=-1)
                 per_token_log_probs = -torch.gather(log_probs, 2, labels[:, :, None]).squeeze(2)
-                if args.learning_algorithm in ["nll", "pg"]:
+                if args.learning_algorithm in ["nll", "wbc"]:
                     per_response_loss = torch.sum(per_token_log_probs * response_mask, dim=1)
-                    if args.learning_algorithm == "pg":
+                    if args.learning_algorithm == "wbc":
                         # Multiply the loss with the rewards
                         rewards = torch.tensor(extra_data['rewards']).to(device)
                         current_epoch_loss_trajectories['rewards'].extend(rewards.tolist())
                         per_response_loss = per_response_loss * rewards
-                elif args.learning_algorithm in ["offline_pg_seq", "offline_a2c"]:
+                elif args.learning_algorithm in ["r_gold"]:
+                    # pi * delta log pi * R
+                    # They also lowerbound pi as max(u, pi) where u is 0.1, 0.15 or .2 for various tasks
+                    with torch.no_grad():
+                        per_token_probs = torch.exp(-per_token_log_probs.detach())
+                        # Lowerbound the importance weight by applying a max on each token to 0.1
+                        lower_bound_per_token_probs = torch.max(per_token_probs, torch.tensor(0.1).to(device))
+                    # Multiply the loss with the probs
+                    lm_loss = torch.mul(per_token_log_probs, lower_bound_per_token_probs)
+                    # per_response_loss_gold_objective = reduce_mean(lm_loss, response_mask, axis=1)
+                    per_response_loss_gold_objective = torch.sum(lm_loss * response_mask, axis=1)
+                    current_epoch_loss_trajectories['gold_objective'].extend(per_response_loss_gold_objective.tolist())
+                    # Multiply the loss with the rewards
+                    rewards = torch.tensor(extra_data['rewards']).to(device)
+                    current_epoch_loss_trajectories['rewards'].extend(rewards.tolist())
+                    per_response_loss = per_response_loss_gold_objective * rewards
+                elif args.learning_algorithm in ["r_lol", "a_lol_seq", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
                     with torch.no_grad():
                         # Compute the baseline model log probs
                         if args.model_type == "seq2seq":
@@ -571,9 +642,9 @@ def main():
                             # Merge the prompt and response inputs
                             baseline_outputs = baseline_model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
                             batch_size, query_seq_len = prompt_inputs["input_ids"].shape
-                            baseline_logits = outputs.logits[:, (query_seq_len - 1):-1, :]
+                            baseline_logits = baseline_outputs.logits[:, (query_seq_len - 1):-1, :]
                         
-                        if args.learning_algorithm == "offline_a2c":
+                        if args.learning_algorithm in ["a_lol_seq", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
                             if args.model_type == "seq2seq":
                                 last_layer_encoder_hidden_state = baseline_outputs.encoder_last_hidden_state
                                 # last_layer_encoder_hidden_state is of the shape (batch_size, seq_len, hidden_size)
@@ -588,26 +659,48 @@ def main():
                         baseline_per_token_log_probs = -torch.gather(baseline_log_probs, 2, labels[:, :, None]).squeeze(2)
                         # Compute the seq importance sampling ratio over each word
                         # Both per_token_log_probs and baseline_per_token_log_probs are negative log probs
-                        importance_sampling_ratio_per_token = torch.exp(baseline_per_token_log_probs - per_token_log_probs.detach()) * response_mask
-                        if args.ppo_clip is not None:
-                            # Clamp the importance sampling ratio
-                            importance_sampling_ratio_per_token_clamped = torch.clamp(importance_sampling_ratio_per_token, 1 - args.ppo_clip, 1 + args.ppo_clip) * response_mask
-                            # return_dict['importance_sampling_ratio_per_token_clamped'] = importance_sampling_ratio_per_token_clamped
-                            importance_sampling_ratio_per_token = importance_sampling_ratio_per_token_clamped
+                        if args.learning_algorithm in ["a_lol_seq"]:
+                            importance_sampling_ratio_per_token = torch.exp(baseline_per_token_log_probs - per_token_log_probs.detach()) * response_mask
+                            if args.ppo_clip is not None:
+                                # Clamp the importance sampling ratio
+                                importance_sampling_ratio_per_token_clamped = torch.clamp(importance_sampling_ratio_per_token, 1 - args.ppo_clip, 1 + args.ppo_clip) * response_mask
+                                # return_dict['importance_sampling_ratio_per_token_clamped'] = importance_sampling_ratio_per_token_clamped
+                                importance_sampling_ratio_per_token = importance_sampling_ratio_per_token_clamped
+                        elif args.learning_algorithm in ["r_lol", "a_lol"]:
+                            # Fix this implementation
+                            baseline_per_response_log_probs = torch.sum(baseline_per_token_log_probs * response_mask, dim=1)
+                            per_response_log_probs = torch.sum(per_token_log_probs * response_mask, dim=1)
+                            importance_sampling_ratio = torch.exp(baseline_per_response_log_probs - per_response_log_probs.detach())
+                            if args.ppo_clip is not None:
+                                importance_sampling_ratio = torch.clamp(importance_sampling_ratio, 1 - args.ppo_clip, 1 + args.ppo_clip)
+                        elif args.learning_algorithm in ["a_lol_ref_free", "a_lol_kl"]:
+                            importance_sampling_ratio = 1.0
                     # Multiply importance sampling with log probs
-                    lm_loss = torch.mul(per_token_log_probs, importance_sampling_ratio_per_token)
-                    per_response_loss_with_importance_sampling = reduce_mean(lm_loss, response_mask, axis=1)
+                    if args.learning_algorithm in ["a_lol_seq"]:
+                        lm_loss = torch.mul(per_token_log_probs, importance_sampling_ratio_per_token)
+                        per_response_loss_with_importance_sampling = torch.sum(lm_loss * response_mask, dim=1)
+                    elif args.learning_algorithm in ["r_lol", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
+                        per_response_loss_with_importance_sampling = importance_sampling_ratio * torch.sum(per_token_log_probs * response_mask, dim=1)
+                    
                     current_epoch_loss_trajectories['loss w/ IS'].extend(per_response_loss_with_importance_sampling.tolist())
                     # Get the rewards from extra args
                     # extra_data is a dict with dict_keys(['texts', 'responses', 'batch', 'rewards'])
                     # Convert list of rewards from extra_data['rewards'] to tensor
                     rewards = torch.tensor(extra_data['rewards']).to(device)
-                    if args.learning_algorithm == "offline_a2c":
+                    if args.learning_algorithm in ["a_lol_seq", "a_lol", "a_lol_ref_free", "a_lol_kl"]:
                         # Multiply the loss with the advantage
                         advantage = rewards - val_outputs
+                        # Check all the advantages are positive
+                        # assert torch.all(advantage >= 0), breakpoint()
                         advantage = torch.clamp(advantage, min=0.0)
                         current_epoch_loss_trajectories['advantage'].extend(advantage.tolist())
                         per_response_loss = per_response_loss_with_importance_sampling * advantage
+                        if args.learning_algorithm == "a_lol_kl":
+                            # Also add the KL divergence between the baseline and current model to the loss
+                            baseline_per_response_log_probs = torch.sum(baseline_per_token_log_probs * response_mask, dim=1)
+                            kl_penalty = args.kl_beta * (baseline_per_response_log_probs - per_response_loss_with_importance_sampling)
+                            current_epoch_loss_trajectories['kl_penalty'].extend(kl_penalty.tolist())
+                            per_response_loss = per_response_loss + kl_penalty
                     else:
                         current_epoch_loss_trajectories['rewards'].extend(rewards.tolist())
                         per_response_loss = per_response_loss_with_importance_sampling * rewards
@@ -660,9 +753,9 @@ def main():
                         current_model_success_measure = gen_reward_avg["sentiment"]
                     elif args.task_name == "COMET":
                         current_model_success_measure = gen_reward_avg["p_valid_model"]
-                    elif args.task_name == "WOW":
+                    elif args.task_name in ["wow", "faithdial_wow"]:
                         current_model_success_measure = gen_reward_avg["faithdial"]
-                    elif args.task_name in ["reddit_pos", "reddit_neg"]:
+                    elif args.task_name in ["reddit_pos", "reddit_neg", "faithdial"]:
                         current_model_success_measure = gen_reward_avg["final_reward"]
                     elif args.task_name == "DailyDialog":
                         # Calculate model perplexity on val set
@@ -698,19 +791,19 @@ def main():
                                 logging.info(f"Updated the baseline {args.success_measure_str} to {baseline_success_measure}")
                                 # Also update the sampling weights
                                 if args.train_sampling:
-                                    if args.learning_algorithm == "offline_pg_seq":
+                                    if args.learning_algorithm == "r_lol":
                                         if args.task_name in ["Xsum", "CNNDailyMail"]:
                                             # NOTE: not using doc_nli reward right now. For CNN the doc_nli reward is mostly close to 0.
                                             train_rewards = [datum['reward_components']['fluency'] + datum['reward_components']['text_sim'] for datum in train_dataset]
                                             # rewards = [datum['reward_components']['fluency'] + datum['reward_components']['text_sim'] + datum['reward_components']['doc_nli_score'] for datum in batch]
-                                        elif args.task_name in ["IWSLT2017EnDe", "IMDBForSeq2Seq", "DailyDialog", "COMET", "WOW", "reddit_pos", "reddit_neg"]:
+                                        elif args.task_name in ["IWSLT2017EnDe", "IMDBForSeq2Seq", "DailyDialog", "COMET", "wow", "faithdial", "faithdial_wow", "reddit_pos", "reddit_neg"]:
                                             train_rewards = [datum['reward_components']['final_reward'] for datum in train_dataset]
                                         train_rewards = np.array(train_rewards)
                                         train_dataset.set_sample_weights(train_rewards)
                                         logging.info(f"Using train_rewards for sampling instead of random sampling")
-                                    elif args.learning_algorithm == "offline_a2c":
+                                    elif args.learning_algorithm in ["a_lol_seq", "a_lol", "a_lol_ref_free"]:
                                         # Re-Estimate the value function on the dev predictions of baseline model
-                                        value_function_estimator = ValueHeadMLP(config, max_value=args.max_value).to(device)
+                                        value_function_estimator = ValueHeadAttention(config, max_value=args.max_value).to(device)
                                         torch.cuda.empty_cache()
                                         logging.info(f"Restimating the value function on the latest dev predictions of baseline model")
                                         best_value_function_model, best_value_mse, best_epoch = train_value_function_on_val_predictions(value_function_estimator, baseline_model, tokenizer, val_dataloader, all_ids, all_gen_responses, all_gen_rewards, args)
@@ -718,6 +811,14 @@ def main():
                                         logging.info(f"Best value function model MSE: {best_value_mse} at val epoch {best_epoch}")
                                         torch.cuda.empty_cache()
                                         all_advantages = get_advantage_predictions_on_dataset(train_dataset, tokenize_collator, baseline_model, best_value_function_model, args)
+                                        all_advantages = np.array(all_advantages)
+                                        # get mean, median, std, min, max of advantage
+                                        advantage_stats = {"mean": np.mean(all_advantages), "median": np.median(all_advantages), "std": np.std(all_advantages), "min": np.min(all_advantages), "max": np.max(all_advantages)}
+                                        # also get the 10 bucket percentiles of advantage
+                                        percentile_10 = [np.percentile(all_advantages, i) for i in range(0, 101, 10)]
+                                        advantage_stats["percentile_10"] = percentile_10
+                                        # Save the advantage stats to file
+                                        save_in_jsonl([advantage_stats], advantage_stats_file, append=True)
                                         # Find ratio of instances with negative advantage
                                         num_instances_with_negative_advantage = len([e for e in all_advantages if e < 0])
                                         ratio = num_instances_with_negative_advantage / len(all_advantages)
@@ -741,9 +842,9 @@ def main():
                         current_validation_stats["sentiment"] = current_model_success_measure
                     elif args.task_name == "COMET":
                         current_validation_stats["p_valid_model"] = current_model_success_measure
-                    elif args.task_name == "WOW":
+                    elif args.task_name in ["wow", "faithdial_wow"]:
                         current_validation_stats["faithdial"] = current_model_success_measure
-                    elif args.task_name in ["reddit_pos", "reddit_neg"]:
+                    elif args.task_name in ["reddit_pos", "reddit_neg", "faithdial"]:
                         current_validation_stats["final_reward"] = current_model_success_measure
                     elif args.task_name == "DailyDialog":
                         current_validation_stats["-ve perplexity"] = -val_perlexity
@@ -871,10 +972,88 @@ def main():
     logging.info(f"#####################  Final evaluation")
     # Make predictions on val set
     all_ids, all_gen_responses, all_val_responses, all_gen_rewards, all_gold_rewards, meteor_score = get_model_predictions(val_dataloader, model, tokenizer, device, reward_args, args)
+
+    """
+    if not args.train and args.task_name == "COMET":
+        # Merge responses with original data and save to file
+        all_val_generations_and_data = [val_data | {"gen_response": gen_response, "gen_reward": gen_rewards["final_reward"]} for val_data, gen_response, gen_rewards in zip(val_dataset, all_gen_responses, all_gen_rewards)]
+        # dict_keys(['id', 'prompt_or_input_text', 'references', 'meta_data', 'reward_components', 'gen_response', 'gen_reward'])
+        save_file = os.path.join(args.output_dir, "val_generations.jsonl")
+        save_in_jsonl(all_val_generations_and_data, save_file)
+        logging.info(f"Saved {len(all_val_generations_and_data)} val generations to {save_file}")
+    """
+
+    # Calculate Distinct n-grams
+    val_unigram_ratio, val_bigram_ratio, val_trigram_ratio = calculate_distinct_ngram_metrics(all_val_responses)
+    logging.info(f"Val Gold: Unigram ratio: {val_unigram_ratio:.4f}, Bigram ratio: {val_bigram_ratio:.4f}, Trigram ratio: {val_trigram_ratio:.4f}")
+    gen_unigram_ratio, gen_bigram_ratio, gen_trigram_ratio = calculate_distinct_ngram_metrics(all_gen_responses)
+    logging.info(f"Val Generation: Unigram ratio: {gen_unigram_ratio:.4f}, Bigram ratio: {gen_bigram_ratio:.4f}, Trigram ratio: {gen_trigram_ratio:.4f}")
     # Get per reward average
     gen_reward_avg = {k: sum([e[k] for e in all_gen_rewards])/len(all_gen_rewards) for k in all_gen_rewards[0].keys()}
+    gen_reward_avg.update({"distinct-1": gen_unigram_ratio, "distinct-2": gen_bigram_ratio, "distinct-3": gen_trigram_ratio})
     gold_reward_avg = {k: sum([e[k] for e in all_gold_rewards])/len(all_gold_rewards) for k in all_gold_rewards[0].keys()}
+    gold_reward_avg.update({"distinct-1": val_unigram_ratio, "distinct-2": val_bigram_ratio, "distinct-3": val_trigram_ratio})
+    # Include length measures and save the test responses
+    avg_gen_response_len = np.mean([len([e for e in resp.split() if e != ""]) for resp in all_gen_responses])
+    avg_gold_response_len = np.mean([len([e for e in resp.split() if e != ""]) for resp in all_val_responses])
+    logging.info(f"Val Generation: avg_response_len: {avg_gen_response_len:.3f}")
+    logging.info(f"Val Gold: avg_response_len: {avg_gold_response_len:.3f}")
+    gen_reward_avg.update({"avg_response_len": avg_gen_response_len})
+    gold_reward_avg.update({"avg_response_len": avg_gold_response_len})
     
+    # Also calculate coverage and density for WoW and Faithdial tasks
+    def get_F_set(article_tokens, summary_tokens):
+        F = list()
+        i = j = 0
+        while i < len(summary_tokens):
+            f = list()
+            while j < len(article_tokens):
+                if summary_tokens[i] == article_tokens[j]:
+                    i_prime, j_prime = i, j
+                    while i_prime < len(summary_tokens) and j_prime < len(article_tokens) and summary_tokens[i_prime] == article_tokens[j_prime]:
+                        i_prime += 1
+                        j_prime += 1
+                    if len(f) < (i_prime-i-1):
+                        f = summary_tokens[i:i_prime]
+                    j = j_prime
+                else:
+                    j += 1
+            i = i + max(len(f), 1)
+            j = 0
+            if len(f) > 0:
+                F.append(f)
+        return F
+    def get_coverage_and_density(all_responses, dataset):
+        all_coverage = list()
+        all_density = list()
+        for response, datum in zip(all_responses, dataset):
+            if len(response) == 0:
+                coverage = density = 0.0
+            else:
+                prompt = datum["prompt_or_input_text"]
+                # Get the knowledge from the prompt
+                assert prompt.startswith("Knowledge:"), breakpoint()
+                knowledge = prompt.split("<|endoftext|>", 1)[0][len("Knowledge:"):].strip()
+                F_set = get_F_set(knowledge.split(), response.split())
+                coverage = sum([len(f) for f in F_set])/len(response.split())
+                density =  sum([len(f)**2 for f in F_set])/len(response.split())
+            all_coverage.append(coverage)
+            all_density.append(density)
+        return np.array(all_coverage), np.array(all_density)
+    if args.task_name in ["wow", "faithdial", "faithdial_wow"]:
+        logging.info(f"Calculating coverage and density for {args.task_name} Val set")
+        all_gen_coverage, all_gen_density = get_coverage_and_density(all_gen_responses, val_dataset)
+        all_gold_coverage, all_gold_density = get_coverage_and_density(all_val_responses, val_dataset)
+        # Calculate mean and std of coverage and density for both gen and gold
+        gen_coverage_avg, gen_coverage_std = np.mean(all_gen_coverage), np.std(all_gen_coverage)
+        gen_density_avg, gen_density_std = np.mean(all_gen_density), np.std(all_gen_density)
+        gold_coverage_avg, gold_coverage_std = np.mean(all_gold_coverage), np.std(all_gold_coverage)
+        gold_density_avg, gold_density_std = np.mean(all_gold_density), np.std(all_gold_density)
+        logging.info(f"Val Generation: Coverage: {gen_coverage_avg:.3f} +/- {gen_coverage_std:.3f}, Density: {gen_density_avg:.3f} +/- {gen_density_std:.3f}")
+        logging.info(f"Val Gold: Coverage: {gold_coverage_avg:.3f} +/- {gold_coverage_std:.3f}, Density: {gold_density_avg:.3f} +/- {gold_density_std:.3f}")
+        gen_reward_avg.update({"coverage": gen_coverage_avg, "coverage_std": gen_coverage_std, "density": gen_density_avg, "density_std": gen_density_std})
+        gold_reward_avg.update({"coverage": gold_coverage_avg, "coverage_std": gold_coverage_std, "density": gold_density_avg, "density_std": gold_density_std})
+
     # Plot side-by-side reward distribution with violin plot
     plot_gen_vs_gold_reward_distribution("val", all_gen_rewards, all_gold_rewards)
     
@@ -898,9 +1077,49 @@ def main():
 
     # Make predictions on test set
     all_ids, all_gen_responses, all_test_responses, all_gen_rewards, all_gold_rewards, meteor_score = get_model_predictions(test_dataloader, model, tokenizer, device, reward_args, args)
+    
+    """
+    if not args.train and args.task_name == "COMET":
+        # Merge responses with original data and save to file
+        all_test_generations_and_data = [test_data | {"gen_response": gen_response, "gen_reward": gen_rewards["final_reward"]} for test_data, gen_response, gen_rewards in zip(test_dataset, all_gen_responses, all_gen_rewards)]
+        # dict_keys(['id', 'prompt_or_input_text', 'references', 'meta_data', 'reward_components', 'gen_response', 'gen_reward'])
+        save_file = os.path.join(args.output_dir, "test_generations.jsonl")
+        save_in_jsonl(all_test_generations_and_data, save_file)
+        logging.info(f"Saved {len(all_test_generations_and_data)} test generations to {save_file}")
+    """
+    
+    # Calculate Distinct n-grams
+    test_unigram_ratio, test_bigram_ratio, test_trigram_ratio = calculate_distinct_ngram_metrics(all_test_responses)
+    logging.info(f"Test Gold: Unigram ratio: {test_unigram_ratio:.4f}, Bigram ratio: {test_bigram_ratio:.4f}, Trigram ratio: {test_trigram_ratio:.4f}")
+    gen_unigram_ratio, gen_bigram_ratio, gen_trigram_ratio = calculate_distinct_ngram_metrics(all_gen_responses)
+    logging.info(f"Test Generation: Unigram ratio: {gen_unigram_ratio:.4f}, Bigram ratio: {gen_bigram_ratio:.4f}, Trigram ratio: {gen_trigram_ratio:.4f}")
+    
     # Get per reward average
     gen_reward_avg = {k: sum([e[k] for e in all_gen_rewards])/len(all_gen_rewards) for k in all_gen_rewards[0].keys()}
+    gen_reward_avg.update({"distinct-1": gen_unigram_ratio, "distinct-2": gen_bigram_ratio, "distinct-3": gen_trigram_ratio})
     gold_reward_avg = {k: sum([e[k] for e in all_gold_rewards])/len(all_gold_rewards) for k in all_gold_rewards[0].keys()}
+    gold_reward_avg.update({"distinct-1": test_unigram_ratio, "distinct-2": test_bigram_ratio, "distinct-3": test_trigram_ratio})
+    # Include length measures and save the test responses
+    avg_gen_response_len = np.mean([len([e for e in resp.split() if e != ""]) for resp in all_gen_responses])
+    avg_gold_response_len = np.mean([len([e for e in resp.split() if e != ""]) for resp in all_test_responses])
+    logging.info(f"Test Generation: avg_response_len: {avg_gen_response_len:.3f}")
+    logging.info(f"Test Gold: avg_response_len: {avg_gold_response_len:.3f}")
+    gen_reward_avg.update({"avg_response_len": avg_gen_response_len})
+    gold_reward_avg.update({"avg_response_len": avg_gold_response_len})
+
+    if args.task_name in ["wow", "faithdial", "faithdial_wow"]:
+        logging.info(f"Calculating coverage and density for {args.task_name} Test set")
+        all_gen_coverage, all_gen_density = get_coverage_and_density(all_gen_responses, test_dataset)
+        all_gold_coverage, all_gold_density = get_coverage_and_density(all_test_responses, test_dataset)
+        # Calculate mean and std of coverage and density for both gen and gold
+        gen_coverage_avg, gen_coverage_std = np.mean(all_gen_coverage), np.std(all_gen_coverage)
+        gen_density_avg, gen_density_std = np.mean(all_gen_density), np.std(all_gen_density)
+        gold_coverage_avg, gold_coverage_std = np.mean(all_gold_coverage), np.std(all_gold_coverage)
+        gold_density_avg, gold_density_std = np.mean(all_gold_density), np.std(all_gold_density)
+        logging.info(f"Test Generation: Coverage: {gen_coverage_avg:.3f} +/- {gen_coverage_std:.3f}, Density: {gen_density_avg:.3f} +/- {gen_density_std:.3f}")
+        logging.info(f"Test Gold: Coverage: {gold_coverage_avg:.3f} +/- {gold_coverage_std:.3f}, Density: {gold_density_avg:.3f} +/- {gold_density_std:.3f}")
+        gen_reward_avg.update({"coverage": gen_coverage_avg, "coverage_std": gen_coverage_std, "density": gen_density_avg, "density_std": gen_density_std})
+        gold_reward_avg.update({"coverage": gold_coverage_avg, "coverage_std": gold_coverage_std, "density": gold_density_avg, "density_std": gold_density_std})
 
     # Plot side-by-side reward distribution with violin plot
     plot_gen_vs_gold_reward_distribution("test", all_gen_rewards, all_gold_rewards)
@@ -929,6 +1148,15 @@ def main():
     logging.info(f"Saving the final evaluation stats at {final_eval_stats_file}")
     final_stats = {"val": final_val_stats, "test": final_test_stats}
     save_in_jsonl([final_stats], final_eval_stats_file)
+
+    # We will also save the test set results in a jsonl file for statistical significance testing
+    if not args.train:
+        # merge all_gen_responses and all_gen_rewards and save in a jsonl file
+        assert len(all_gen_responses) == len(all_gen_rewards), breakpoint()
+        all_gen_responses_and_rewards = [{"response": gen_resp} | gen_rewards for gen_resp, gen_rewards in zip(all_gen_responses, all_gen_rewards)]
+        all_gen_responses_and_rewards_file = os.path.join(args.output_dir, "test_gen_responses_and_rewards.jsonl")
+        logging.info(f"Saving {len(all_gen_responses_and_rewards)} test generation responses and rewards in {all_gen_responses_and_rewards_file}")
+        save_in_jsonl(all_gen_responses_and_rewards, all_gen_responses_and_rewards_file)
 
 if __name__ == '__main__':
     main()

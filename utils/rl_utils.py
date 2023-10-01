@@ -5,6 +5,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AdamW
 
+# from trl.models.modeling_base import PreTrainedModelWrapper
 import torch.nn.functional as F
 from .utils import logits_to_entropy, log_list
 import pandas as pd
@@ -132,7 +133,7 @@ class LanguageGenerationCollator(object):
                 # NOTE: not using doc_nli reward right now. For CNN the doc_nli reward is mostly close to 0.
                 rewards = [datum['reward_components']['fluency'] + datum['reward_components']['text_sim'] for datum in batch]
                 # rewards = [datum['reward_components']['fluency'] + datum['reward_components']['text_sim'] + datum['reward_components']['doc_nli_score'] for datum in batch]
-            elif self.params.task_name in ["IWSLT2017EnDe", "IMDBForSeq2Seq", "DailyDialog", "COMET", "WOW", "reddit_pos", "reddit_neg"]:
+            elif self.params.task_name in ["IWSLT2017EnDe", "IMDBForSeq2Seq", "DailyDialog", "COMET", "WOW", "faithdial", "faithdial_wow", "reddit_pos", "reddit_neg"]:
                 rewards = [datum['reward_components']['final_reward'] for datum in batch]
             else:
                 breakpoint()
@@ -157,6 +158,7 @@ def get_model_predictions(dataloader, model, tokenizer, device, reward_args, arg
     all_gen_rewards = []
     all_gold_rewards = []
     all_ids = list()
+    counter = 0
     with torch.no_grad():
         for batch in tqdm(dataloader, desc=f"Generating responses for task {task_name}"):
             prompt_inputs, response_inputs, extra_data = batch
@@ -179,6 +181,7 @@ def get_model_predictions(dataloader, model, tokenizer, device, reward_args, arg
             
             # extra_data id a dict with keys: dict_keys(['texts', 'responses', 'batch'])
             gold_responses = extra_data['responses']
+            gold_responses = [resp.replace("<|endoftext|>", "") for resp in gold_responses]
             # Get text from prompts
             prompts = extra_data['prompts']
             # Extra data already has gold rewards. No need to calculate them again
@@ -190,20 +193,26 @@ def get_model_predictions(dataloader, model, tokenizer, device, reward_args, arg
             # Get gold and gen rewards
             reward_component_to_fn_map = task_to_reward_fn_map[task_name]
             gen_rewards = get_batch_rewards(texts, gen_resp, reward_args, reward_component_to_fn_map)
+            # keep track of all ids
+            all_ids.extend(extra_data['ids'])
             # Each element in gold_rewards and gen_rewards is a dict with keys: dict_keys(['fluency', 'text_sim', 'final_reward'])
             all_gen_responses.extend(generated_responses)
             all_gold_responses.extend(gold_responses)
             all_gen_rewards.extend(gen_rewards)
             all_gold_rewards.extend(gold_rewards)
-            # Also keep track of all ids
-            all_ids.extend(extra_data['ids'])
             # logging.info(f"Prompts:")
             # log_list(prompts)
             # logging.info(f"Generated responses:")
-            # log_list(generated_responses)
-            # logging.info(f"Gold responses:")
-            # log_list(gold_responses)
+            # gen_resp_and_rewards = list(zip(generated_responses, gen_rewards))
+            # log_list(gen_resp_and_rewards)
             # breakpoint()
+            # logging.info(f"Gold responses:")
+            # gold_resp_and_rewards = list(zip(gold_responses, gold_rewards))
+            # log_list(gold_resp_and_rewards)
+            # counter += 1
+            # # TEMP: debugging
+            # if counter == 2:
+            #     break
     # Compute the meteor metric
     score = metric.compute(predictions=generated_responses, references=gold_responses)
     meteor_score = score['meteor']
@@ -491,9 +500,10 @@ class ValueHeadAttention(nn.Module):
         # Apply dropout
         mha_output = self.dropout(mha_output)
         # Apply linear layer
-        output = self.summary(mha_output).squeeze()
+        output = self.summary(mha_output).squeeze(2).squeeze(1)
         value = self.sigmoid(output) * self.max_value
         return value
+
 
 ### Generation tasks utils
 from .attributes_utils import get_cola_fluency_score
@@ -724,7 +734,7 @@ def get_batch_faithfulness_reward(batch_text, batch_responses, reward_args):
         critic_scores = probs[:, 0].tolist()
     return critic_scores
 
-def get_batch_faithdail_depth_reward(batch_text, batch_responses, reward_args):
+def get_batch_faithdial_depth_reward(batch_text, batch_responses, reward_args):
     # reward_args has dict_keys(['device', 'cola_classifier_model', 'cola_pipeline', 'faithdial_critic_model_name', 'faithdial_tokenizer', 'faithdial_critic_model', 'depth_dialogRPT_model_name', 'depth_dialogRPT_tokenizer', 'depth_dialogRPT_model'])
     device = reward_args["device"]
     eos_token = "<|endoftext|>"
@@ -811,7 +821,9 @@ task_to_reward_fn_map = {
     "DailyDialog": {"fluency": get_batch_cola_fluency_reward, "tfidf": get_batch_tfidf_reward},
     "CommonGen": {"fluency": get_batch_cola_fluency_reward, "coverage": get_batch_coverage_reward},
     "COMET": {"p_valid_model": get_batch_comet_reward},
-    "WOW": {"fluency": get_batch_cola_fluency_reward, "faithdial": get_batch_faithfulness_reward, "depth": get_batch_faithdail_depth_reward, "tfidf": get_batch_tfidf_reward},
+    "WOW": {"fluency": get_batch_cola_fluency_reward, "faithdial": get_batch_faithfulness_reward, "depth": get_batch_faithdial_depth_reward, "tfidf": get_batch_tfidf_reward},
+    "faithdial": {"fluency": get_batch_cola_fluency_reward, "faithdial": get_batch_faithfulness_reward, "depth": get_batch_faithdial_depth_reward, "tfidf": get_batch_tfidf_reward},
+    "faithdial_wow": {"fluency": get_batch_cola_fluency_reward, "faithdial": get_batch_faithfulness_reward, "depth": get_batch_faithdial_depth_reward, "tfidf": get_batch_tfidf_reward},
     "reddit_pos": {"fluency": get_batch_cola_fluency_reward, "depth": get_batch_dialogrpt_depth_reward, "updown": get_batch_dialogrpt_updown_reward, "safe": get_batch_toxichat_safe_reward, "tfidf": get_batch_tfidf_reward},
     "reddit_neg": {"fluency": get_batch_cola_fluency_reward, "depth": get_batch_dialogrpt_depth_reward, "updown": get_batch_dialogrpt_updown_reward, "safe": get_batch_toxichat_safe_reward, "tfidf": get_batch_tfidf_reward},
 }
@@ -833,7 +845,7 @@ def get_text_and_responses_from_task_prompts_and_references(task_name, prompt_or
     elif task_name in ["DailyDialog", "COMET"]:
         batch_texts = prompt_or_input_text_list
         batch_responses = references_list
-    elif task_name in ["WOW", "reddit_pos", "reddit_neg"]:
+    elif task_name in ["WOW", "faithdial", "faithdial_wow", "reddit_pos", "reddit_neg"]:
         batch_texts = prompt_or_input_text_list
         # Remove eos_token from end of responses
         eos_token = "<|endoftext|>"
@@ -869,7 +881,7 @@ def general_batch_prompt_and_reward_generator(task_batch_samples, reward_args, e
     final_data_dicts = [{"id": id, "prompt_or_input_text": prompt_or_input_text, "references": references, "meta_data": meta_data, "reward_components": reward_components} for id, prompt_or_input_text, references, meta_data, reward_components in zip(id_list, prompt_or_input_text_list, references_list, meta_data_list, batch_reward_components)]
     return final_data_dicts
 
-from .rl4lms_data_utils import Xsum, CNNDailyMail, IMDBForSeq2Seq, IWSLT2017EnDe, DailyDialog, CommonGen
+from utils.rl4lms_data_utils import Xsum, CNNDailyMail, IMDBForSeq2Seq, IWSLT2017EnDe, DailyDialog, CommonGen
 
 
 task_to_class_mapping = {
@@ -896,3 +908,199 @@ task_to_class_mapping = {
                         "CommonGen": {"class": CommonGen,
                                       "prepare_args": {"concept_end_token": ".", "concept_separator_token": " ", "prefix": "generate a sentence with: "}},
                         }
+
+
+#############################################################################
+### Editing task RL-utils
+#############################################################################
+from collections import defaultdict
+from utils.data_utils import get_all_thresholds_for_metric
+from utils.attributes_utils import get_offensive_scores, get_batched_metrics_for_threads, get_per_response_metrics_from_results, get_metric_threshold_satisfaction, metric_to_key_mapping, get_cola_fluency_score
+from reward import get_varied_threshold_t_avg_reward, get_varied_threshold_f_t_reward
+import random
+from utils.model_utils import prepare_edit_prompt, check_valid_edit
+from itertools import  product
+from utils.utils import remove_multiple_space
+def train_value_function_on_val_set(args, value_function_model, edit_policy, val_data_pool):
+    logging.info(f"############################ Estimating value function on val set")
+    extra_args = args.extra_args
+    device = extra_args['device']
+    # 1. Evaluate the current policy on val set for reward estimation
+    # 1.1. Prepare prompts, responses and thresholds for evaluation
+    # val_data_pool consists of lists of keys, prompts, responses, metrics
+    metric_names = list(args.attributes_dict.keys())
+    n_metrics = len(metric_names)
+    if n_metrics == 1:
+        thresh_combinations_sample_size = 5
+    elif n_metrics == 2:
+        thresh_combinations_sample_size = 15
+    else:
+        logging.error(f"Number of metrics should be 1 or 2. Got {n_metrics}")
+        breakpoint()
+    
+    all_val_edit_prompts_resps_and_thresholds = list()
+    for key, prompt, response, resp_metrics in zip(val_data_pool.keys, val_data_pool.prompts, val_data_pool.responses, val_data_pool.metrics):
+        prompt = "" if prompt is None else prompt
+        if args.cola_classifier_model is not None and "cola_fluency" not in resp_metrics:
+            # Compute cola fluency if not already computed
+            resp_metrics["cola_fluency"] = get_cola_fluency_score(extra_args["cola_pipeline"](response)[0])
+        # We need to sample threshold combinations for each prompt, response pair based on the metric
+        per_metric_available_threshold = defaultdict(list)
+        for metric_name in metric_names:
+            all_available_thresholds = get_all_thresholds_for_metric(metric_name)
+            metric_key = metric_to_key_mapping[metric_name][args.attributes_dict[metric_name]]
+            per_metric_available_threshold[metric_name] = all_available_thresholds
+        attr_threshold_combinations = list(product(*per_metric_available_threshold.values()))
+        # Filter the threshold combinations which is satisfied by the response
+        unsatisfied_thresholds_dicts = list()
+        for thres_combination in attr_threshold_combinations:
+            # NOTE: for multi-attribute control, there will be more than one available attributes
+            assert len(thres_combination) == n_metrics
+            # create thresholds dict from attributes_dict
+            thresholds_dict = deepcopy(args.attributes_dict)
+            k = 0
+            for metric_name, thresholds in thresholds_dict.items():
+                thresholds_dict[metric_name] = (thresholds_dict[metric_name], thres_combination[k][0], thres_combination[k][1])
+                metric_key = metric_to_key_mapping[metric_name][thresholds_dict[metric_name][0]]
+                k += 1
+            metric_thresh_satisfaction = get_metric_threshold_satisfaction(resp_metrics, thresholds_dict)
+            if all(metric_thresh_satisfaction.values()):
+                continue
+            else:
+                unsatisfied_thresholds_dicts.append(thresholds_dict)
+        # Sample threshold combinations from unsatisfied_thresholds_dicts
+        sampled_thresholds_dicts = random.sample(unsatisfied_thresholds_dicts, min(len(unsatisfied_thresholds_dicts), thresh_combinations_sample_size))
+        for thresholds_dict in sampled_thresholds_dicts:
+            all_val_edit_prompts_resps_and_thresholds.append({"key": key, "prompt": prompt, "response": response, "metrics": resp_metrics, "thresholds": thresholds_dict})
+    # 1.2. Evaluate the current policy on the val set and sampled thresholds
+    batch_size = args.eval_batch_size
+    tokenizer = edit_policy.tokenizer
+    if args.reward_function == "t_avg":
+        reward_fn = get_varied_threshold_t_avg_reward
+    elif args.reward_function == "f_t":
+        reward_fn = get_varied_threshold_f_t_reward
+    else:
+        logging.error(f"Unknown reward function: {args.reward_function}")
+    total_empty_responses = 0
+    total_valid_responses = 0
+    total_responses = 0
+    final_eval_prompts_and_rewards = list()
+    for i in tqdm(range(0, len(all_val_edit_prompts_resps_and_thresholds), batch_size), desc='Value Function estimation val edits'):
+        batch_data = all_val_edit_prompts_resps_and_thresholds[i:i + batch_size]
+        # Get the prompts, previous_responses and metrics for the keys
+        threads = [data['prompt'] for data in batch_data]
+        thresholds_dicts = [data['thresholds'] for data in batch_data]
+        prev_responses = [data['response'] for data in batch_data]
+        prev_response_metrics = [data['metrics'] for data in batch_data]
+
+        init_responses = [data['response'] if args.include_init else None for data in batch_data]
+        # Will always pick the best generation from the previous iteration for editing
+        batch_edit_prompts = [prepare_edit_prompt(thread, prev_response, resp_metrics, thresholds, init_response=init_response) 
+                                for thread, prev_response, resp_metrics, thresholds, init_response in 
+                                zip(threads, prev_responses, prev_response_metrics, thresholds_dicts, init_responses)]
+        responses = edit_policy.generate(prompts=batch_edit_prompts, max_len=args.response_length, sample=True, temperature=args.temperature, top_p=args.top_p)['response/text']
+        responses_until_endofedit = [r[:r.find("<|end-of-edit|>")].strip() for r in responses]
+        responses = responses_until_endofedit
+        edit_validity = [check_valid_edit(prev_response, response, args.unrestricted_editing) for prev_response, response in zip(prev_responses, responses)]
+        # TEMP: Update the empty responses to "empty" and keep track of total empty responses
+        total_empty_responses += sum([1 for r in responses if r.strip() == ""])
+        # Calculate metrics for the generated responses
+        total_valid_responses += sum(edit_validity)
+        total_responses += len(edit_validity)
+        # Find common substring from left and right
+        span_less_responses = [remove_multiple_space(r.replace("<|span-start|>", "").replace("<|span-end|>", "")) for r in responses]
+        span_less_responses = [r if r.strip() != "" else 'empty' for r in span_less_responses]
+        
+        for j, (data, edit_prompt, response, span_less_response, valid) in enumerate(zip(batch_data, batch_edit_prompts, responses, span_less_responses, edit_validity)):
+            if not valid:
+                # Skip
+                continue
+            else:
+                # Prepare the response for metrics
+                thread = data['prompt']
+                thresholds_dict = data['thresholds']
+                thread_with_new_response = thread + tokenizer.eos_token + span_less_response + tokenizer.eos_token
+                tokens = tokenizer.encode(thread_with_new_response)
+                if len(tokens) > 512:
+                    # skip this response and also mark it as invalid
+                    logging.warning(f"Too long thread + edited response. Hence Skipping. Total tokens in DGPT model is {len(tokens)} > 512")
+                    continue
+                new_response_metric_results = get_batched_metrics_for_threads([thread_with_new_response], extra_args, thresholds_dict=thresholds_dict, batch_size=batch_size, last_responses = [span_less_response])
+                prev_resp_metrics = data['metrics']
+                prev_resp = data['response']
+                new_resp_metrics = get_per_response_metrics_from_results(new_response_metric_results, thresholds_dict, 1)[0]
+                # Calculate the rewards
+                # TEMP: Only looking at the reward of metric threshold satisfaction
+                reward = reward_fn(new_resp_metrics, prev_resp_metrics, thresholds_dict, ignore_cola=True)
+                # if args.include_similarity_model:
+                #     resp_sim = data_pool.get_embedding_similarity(prev_resp, span_less_response)
+                #     reward += resp_sim
+                final_eval_prompts_and_rewards.append({"edit_prompt": edit_prompt, "response": span_less_response, "reward": reward})
+    
+    # 2. Train the value head on the final_eval_prompts_and_rewards
+    # 2.1. Create a new optimizer for value head
+    from transformers import AdamW
+    value_fn_optimizer = AdamW([{'params': value_function_model.parameters()}], lr=args.lr)
+    n_value_head_epochs = args.value_head_train_epochs
+    # TEMP: Smaller number of epochs for debugging
+    # n_value_head_epochs = 1
+    logging.info(f"Estimating baseline policy value function for {n_value_head_epochs} epochs on {len(final_eval_prompts_and_rewards)} instances from val set edits")
+    best_value_mse = float("inf")
+    best_value_function_model = None
+    best_epoch = None
+    value_function_model.train()
+    edit_policy.model.eval()
+    tqdm_flag = True
+    for epoch in range(n_value_head_epochs):
+        random.shuffle(final_eval_prompts_and_rewards)
+        pbar = range(0, len(final_eval_prompts_and_rewards), batch_size)
+        pbar = tqdm(pbar) if tqdm_flag else pbar
+        total_loss = 0.0
+        total_steps = 0
+        model_correct = 0.0
+        total_instances = 0.0
+        for i in pbar:
+            value_function_model.zero_grad()
+            batch_data = final_eval_prompts_and_rewards[i:i + batch_size]
+            batch_edit_prompts = [data['edit_prompt'] for data in batch_data]
+            batch_responses = [data['response'] for data in batch_data]
+            batch_rewards = [data['reward'] for data in batch_data]
+            # Tokenize batch_edit prompts and get the hidden states via forward pass
+            # Pad the query on the left and the response on the right
+            tokenizer.padding_side = 'left'
+            query_encodings_dict = tokenizer(batch_edit_prompts, return_tensors="pt", padding=True)
+            query_input_ids = query_encodings_dict['input_ids']
+            query_mask = query_encodings_dict['attention_mask']
+
+            tokenizer.padding_side = 'right'
+            response_encodings_dict = tokenizer(batch_responses, return_tensors="pt", padding=True)
+            response_input_ids = response_encodings_dict['input_ids']
+            response_mask = response_encodings_dict['attention_mask']
+            with torch.no_grad(): outputs = edit_policy.forward_pass(query_input_ids, query_mask, response_input_ids, response_mask, return_last_hidden=True)
+            last_layer_hidden_state = outputs['last_layer_hidden_state']
+            # Get the hidden state of query only
+            query_hidden_state = last_layer_hidden_state[:, :query_input_ids.shape[1], :]
+            # query_hidden_state is of the shape (batch_size, query_len, hidden_size)
+            # Get value function predictions for the query
+            val_outputs = value_function_model(query_hidden_state)
+            val_targets = torch.FloatTensor(batch_rewards).to(device)
+            loss = F.mse_loss(val_outputs, val_targets)
+            
+            # 4. Backpropagate the loss
+            loss.backward()
+            value_fn_optimizer.step()
+            # 5. Log the loss
+            total_loss += loss.item()
+            total_steps += 1
+            avg_total_loss = total_loss / total_steps
+            if tqdm_flag:
+                pbar.set_postfix({"step_loss": loss.item(), "avg_total_loss": avg_total_loss})
+        if avg_total_loss < best_value_mse:
+            best_value_mse = avg_total_loss
+            best_value_function_model = deepcopy(value_function_model)
+            best_epoch = epoch+1
+            logging.info(f"Found new best value head with MSE {best_value_mse} at epoch {best_epoch}")
+        logging.info(f"Epoch {epoch+1} finished with MSE {avg_total_loss}")
+    # 6. Return the trained best value head
+    best_value_function_model.eval()
+    return best_value_function_model, best_value_mse, best_epoch

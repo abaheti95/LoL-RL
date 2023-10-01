@@ -1,4 +1,4 @@
-# We will batch preprocess Wizards of Wikipedia and add rewards to it
+# We will batch preprocess Faithdial and Wizards of Wikipedia and add rewards to it
 
 from utils.utils import RANDOM_SEED, log_list, print_list, make_dir_if_not_exists, save_in_pickle, load_from_pickle, save_in_json, load_from_json, format_time, plot_train_loss, log_TP_FP_FN_TN_from_binary_predictions, save_list_of_tuples_to_tsv, load_from_tsv_to_list_of_list, save_in_jsonl, load_from_jsonl, get_ngrams_from_sentence
 import pdb
@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-i", "--input_dir", help="directory Reddit Comment Scores data", type=str, required=True)
+parser.add_argument("-i", "--input_task", help="Name of the task", type=str, required=True, choices=["faithdial", "wow", "faithdial_wow"])
 parser.add_argument("-o", "--output_dir", help="Path to the output directory where we will save all preprocessed language generation data and rewards in jsonl files", type=str, required=True)
 parser.add_argument("-pd", "--plot_violin_distribution", help="Plot violin distribution for reward components", action="store_true")
 parser.add_argument("-m", "--model_name", help="Name of the model to be used for tokenization", type=str, required=True)
@@ -156,6 +156,14 @@ def compute_rewards_for_wizard_utterances(task_name, wizard_utterances, reward_a
     logging.info(f"Total reduced history = {total_reduced_history}/{len(wizard_utterances)}")
     return all_rewarded_data
 
+def convert_faithdial_dataset_to_list(faithdial_dataset):
+    all_data_dicts = list()
+    for i in range(len(faithdial_dataset)):
+        data_dict = faithdial_dataset[i]
+        data_dict['dialog_idx'] = i
+        all_data_dicts.append(data_dict)
+    return all_data_dicts
+
 def main():
     args.device = device
     # Load the FaithDail dataset
@@ -165,26 +173,31 @@ def main():
     faithdial_train_data = dataset["train"]
     faithdial_val_data = dataset["validation"]
     faithdial_test_data = dataset["test"]
+    # Convert all faithdial datasets to list while fixing the ids
+    faithdial_train_data = convert_faithdial_dataset_to_list(faithdial_train_data)
+    faithdial_val_data = convert_faithdial_dataset_to_list(faithdial_val_data)
+    faithdial_test_data = convert_faithdial_dataset_to_list(faithdial_test_data)
     logging.info(f"train size = {len(faithdial_train_data)}, val size = {len(faithdial_val_data)}, test size = {len(faithdial_test_data)}")
     # train size = 18357, val size = 3417, test size = 3539
     # Each datapoint contains dict_keys(['dialog_idx', 'response', 'original_response', 'history', 'knowledge', 'BEGIN', 'VRM'])
     # {'dialog_idx': 0, 'response': 'Yeah, but once the access to the internet was a rare thing. do you remember?', 'original_response': "No I could not! I couldn't imagine living when internet access was rare and very few people had it!", 'history': ['Can you imagine the world without internet access?'], 'knowledge': 'Internet access was once rare, but has grown rapidly.', 'BEGIN': ['Hallucination'], 'VRM': ['Disclosure', 'Ack.']}
     
     # Load the wow dataset from input_dir
+    wow_dir = "data/wow"
     start_time = time()
-    train_file = os.path.join(args.input_dir, "train.json")
+    train_file = os.path.join(wow_dir, "train.json")
     train_data = load_from_json(train_file)
     logging.info(f"Loaded {len(train_data)} instances from {train_file}")
-    val_seen_file = os.path.join(args.input_dir, "valid_random_split.json")
+    val_seen_file = os.path.join(wow_dir, "valid_random_split.json")
     val_seen_data = load_from_json(val_seen_file)
     logging.info(f"Loaded {len(val_seen_data)} instances from {val_seen_file}")
-    val_unseen_file = os.path.join(args.input_dir, "valid_topic_split.json")
+    val_unseen_file = os.path.join(wow_dir, "valid_topic_split.json")
     val_unseen_data = load_from_json(val_unseen_file)
     logging.info(f"Loaded {len(val_unseen_data)} instances from {val_unseen_file}")
-    test_seen_file = os.path.join(args.input_dir, "test_random_split.json")
+    test_seen_file = os.path.join(wow_dir, "test_random_split.json")
     test_seen_data = load_from_json(test_seen_file)
     logging.info(f"Loaded {len(test_seen_data)} instances from {test_seen_file}")
-    test_unseen_file = os.path.join(args.input_dir, "test_topic_split.json")
+    test_unseen_file = os.path.join(wow_dir, "test_topic_split.json")
     test_unseen_data = load_from_json(test_unseen_file)
     logging.info(f"Loaded {len(test_unseen_data)} instances from {test_unseen_file}")
     logging.info(f"Loaded wow dataset in {time() - start_time} seconds")
@@ -263,6 +276,50 @@ def main():
     logging.info(f"Loaded the tokenizer from {args.model_name}")
     reward_args["tokenizer"] = tokenizer
 
+    def preprocess_task_segment(wizard_utterances, segment_name):
+        task_name = "WOW"
+        # Convert utterance data into prompt and response pairs for reward computations
+        wizard_rewarded = compute_rewards_for_wizard_utterances(task_name, wizard_utterances, reward_args, segment_name)
+        logging.info(f"Computed rewards for {len(wizard_rewarded)} wizard utterances in train split")
+        save_file = os.path.join(args.output_dir, f"{segment_name}.jsonl")
+        logging.info(f"Saving {len(wizard_rewarded)} {segment_name} dicts to {save_file}")
+        save_in_jsonl(wizard_rewarded, save_file)
+        # Plot the train reward components distribution
+        reward_components = [d["reward_components"] for d in wizard_rewarded]
+        plot_reward_components_distribution(reward_components, segment_name, args)
+
+    if args.input_task == "wow":
+        preprocess_task_segment(train_wizard_utterances, "train")
+        preprocess_task_segment(val_unseen_wizard_utterances, "val")
+        preprocess_task_segment(faithdial_test_data, "faithdial_test")
+    elif args.input_task == "faithdial":
+        preprocess_task_segment(faithdial_train_data, "train")
+        preprocess_task_segment(faithdial_val_data, "val")
+        preprocess_task_segment(faithdial_test_data, "test")
+    elif args.input_task == "faithdial_wow":
+        # Combine train and val splits of faithdial and wow
+        n_wizard_dialogs = len(train_wizard_utterances)
+        faithdial_train_data_list = list()
+        for i, d in enumerate(faithdial_train_data):
+            d["dialog_id"] = i + 1 + n_wizard_dialogs
+            faithdial_train_data_list.append(d)
+        train_utterances = train_wizard_utterances + faithdial_train_data_list
+        random.shuffle(train_utterances)
+        logging.info(f"New merged train data (WOW) {len(train_wizard_utterances)} and (FaithDial) {len(faithdial_train_data_list)} = {len(train_utterances)}")
+        preprocess_task_segment(train_utterances, "train")
+        n_val_wizard_dialogs = len(val_unseen_wizard_utterances)
+        faithdial_val_data_list = list()
+        for i, d in enumerate(faithdial_val_data):
+            d["dialog_id"] = i + 1 + n_val_wizard_dialogs
+            faithdial_val_data_list.append(d)
+        logging.info(f"New merged val data (FaithDial) {len(faithdial_val_data_list)} and (WOW) {len(val_unseen_wizard_utterances)} = {len(faithdial_val_data_list) + len(val_unseen_wizard_utterances)}")
+        preprocess_task_segment(val_unseen_wizard_utterances + faithdial_val_data_list, "val")
+        preprocess_task_segment(faithdial_test_data, "test")
+    else:
+        logging.error(f"Unknown input task {args.input_task}")
+        breakpoint()
+
+    """
     task_name = "WOW"
     # Convert utterance data into prompt and response pairs for reward computations
     train_wizard_rewarded = compute_rewards_for_wizard_utterances(task_name, train_wizard_utterances, reward_args, "train")
@@ -321,7 +378,7 @@ def main():
     # Plot the test unseen reward components distribution
     test_reward_components = [d["reward_components"] for d in test_wizard_rewarded]
     plot_reward_components_distribution(test_reward_components, "test", args)
-
+    """
 
 
 if __name__ == '__main__':
