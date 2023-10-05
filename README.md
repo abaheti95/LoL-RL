@@ -13,10 +13,17 @@ paper: https://arxiv.org/abs/2305.14718
 }
 ```
 
+📢 **New**
+- Uploaded pretrained adapters for Helpful and Harmless Assistant Task from the best methods to huggingface
+    1. A-LoL seq. - [abaheti95/a_lol_seq_good_prioirty_qlora_hh](https://huggingface.co/abaheti95/a_lol_seq_good_prioirty_qlora_hh)
+    2. A-LoL - [abaheti95/a_lol_good_prioirty_qlora_hh](https://huggingface.co/abaheti95/a_lol_good_prioirty_qlora_hh)
+    3. A-LoL KL - [abaheti95/a_lol_kl_good_prioirty_qlora_hh](https://huggingface.co/abaheti95/a_lol_kl_good_prioirty_qlora_hh)
+    4. DPO - [abaheti95/dpo_qlora_hh](https://huggingface.co/abaheti95/dpo_qlora_hh)
+
 ## Experiments
 Install Packages: `pip install -r requirements.txt`
 
-### 7B LLaMA QLoRA experiment  
+### Harmless and Helpful Assistant Task - 7B LLaMA QLoRA experiment  
 
 How to get Harmless and Helpful Assistant Task Dataset?  
 1. Get the data from PRO repo: https://github.com/AlibabaResearch/DAMO-ConvAI/tree/main/PRO  
@@ -41,9 +48,12 @@ How to train models with Online RL methods?
 1. PPO: `python ppo_qlora_llama_hh.py --output_dir "checkpoints/ppo_timdettmers_qlora_llama_3e/" --cache_dir "cache/ppo_tim_cache" --total_steps 3000`  
 2. Evaluate existing PPO checkpoint: `python ppo_hh_eval.py --model_name_or_path "reciprocate/ppo_hh_pythia-6B" --output_dir "checkpoints/ppo_hh_pythia_6B/"`
 
+How to evaluate any QLoRA model on test set?  
+`python qlora_llama_hh_eval.py --adapter_path [PATH_TO_ADAPTER] --output_dir [OUTPUT_DIR]`
+
 ### Small model experiments
 
-#### 1. Commonsense Transformer - COMET  
+#### 1. Commonsense Transformer - COMET 1.5B GPT2-XL experiment
 
 ##### Preprocessing
 
