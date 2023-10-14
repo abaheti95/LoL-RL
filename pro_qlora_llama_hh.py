@@ -23,10 +23,9 @@ import numpy as np
 from copy import deepcopy
 from collections import defaultdict, Counter
 import math
-from utils import RANDOM_SEED, save_in_pickle, load_from_pickle, make_dir_if_not_exists, save_in_jsonl, print_gpu_info
+from utils.utils import RANDOM_SEED, save_in_pickle, load_from_pickle, make_dir_if_not_exists, save_in_jsonl, print_gpu_info
 import random
 
-from rl_utils import ValueHeadMLP, ValueHeadAttention, numba_choice
 
 # Define and parse arguments.
 @dataclass

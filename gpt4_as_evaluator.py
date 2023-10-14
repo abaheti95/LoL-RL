@@ -3,7 +3,7 @@ import os
 
 from gpt import OpenAICommunicator
 from tqdm import tqdm
-from utils import load_from_json, load_from_jsonl, save_in_jsonl, make_dir_if_not_exists
+from utils.utils import load_from_json, load_from_jsonl, save_in_jsonl, make_dir_if_not_exists
 import logging
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 

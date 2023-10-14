@@ -2,7 +2,7 @@
 import logging
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 from datasets import Dataset, load_dataset
-from utils import save_in_jsonl, distinctness, load_from_pickle
+from utils.utils import save_in_jsonl, distinctness, load_from_pickle
 import os
 def main():
     data_dir = "data/hh_train_len2"

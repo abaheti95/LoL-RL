@@ -22,11 +22,10 @@ import pandas as pd
 import numpy as np
 from copy import deepcopy
 from collections import defaultdict, Counter
-from utils import RANDOM_SEED, save_in_pickle, load_from_pickle, make_dir_if_not_exists, save_in_jsonl
+from utils.utils import RANDOM_SEED, save_in_pickle, load_from_pickle, make_dir_if_not_exists, save_in_jsonl
 import random
 random.seed(RANDOM_SEED)
 
-from rl_utils import ValueHeadMLP, ValueHeadAttention, numba_choice
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

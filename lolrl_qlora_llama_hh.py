@@ -22,10 +22,10 @@ import pandas as pd
 import numpy as np
 from copy import deepcopy
 from collections import defaultdict, Counter
-from utils import RANDOM_SEED, save_in_pickle, load_from_pickle, make_dir_if_not_exists, reduce_mean, save_in_jsonl, reduce_sum
+from utils.utils import RANDOM_SEED, save_in_pickle, load_from_pickle, make_dir_if_not_exists, reduce_mean, save_in_jsonl, reduce_sum
 import random
 
-from rl_utils import ValueHeadMLP, ValueHeadAttention, numba_choice
+from utils.rl_utils import ValueHeadMLP, ValueHeadAttention, numba_choice
 
 # Define and parse arguments.
 @dataclass

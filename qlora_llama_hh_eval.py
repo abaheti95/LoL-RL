@@ -21,11 +21,9 @@ from time import time
 import pandas as pd
 import numpy as np
 from copy import deepcopy
-from utils import RANDOM_SEED, save_in_jsonl
+from utils.utils import RANDOM_SEED, save_in_jsonl
 import random
 random.seed(RANDOM_SEED)
-
-from rl_utils import ValueHeadMLP, ValueHeadAttention, numba_choice
 
 # Define and parse arguments.
 @dataclass
