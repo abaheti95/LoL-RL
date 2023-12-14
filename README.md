@@ -3,7 +3,7 @@
 We introduce a new offline RL algorithm for language model fine-tuning that can incorporate any real-value🌍 reward function on any pre-existing language data📖.  
 The 🗝️key assumption is to treat the entire output sequence from LM as a single action in RL setup. Using this assumption we obtain a sequence level value estimate of the reference policy with its validation set performance. The reference policy in our case is simply the SFT model finetuned with negative log likelihood (NLL) i.e. Behavior Cloning. The final learning equation for A-LoL looks like:  
 <img src="images/A_LoL_eq.png" width="500">  
-👉 Using the reference policy value estimate, we find the subset of training set that still has positive advantage (i.e. Leftover Lunch 🍱) and only train on that subset with prioritized sampling. We additionally test three variants of A-LoL by modifying the importance weight term - **A-LoL ref-free, A-LoL seq, A-LoL KL** (more details in the [paper](https://arxiv.org/abs/2305.14718)).
+👉 Using the reference policy value estimate, we find the subset of training set that still has positive advantage (i.e. Leftover Lunch 🍱) and only train on that subset with prioritized sampling. We additionally test three variants of A-LoL by modifying the importance weight term - **A-LoL ref-free, A-LoL seq, A-LoL KL** (more details in the [paper](https://arxiv.org/abs/2305.14718)). Overall, A-LoL is very easy to implement😌 on top of standard NLL finetuning and results in a stable and sample efficient💪 offline RL algorithm that can incorporate any reward function and data source.
 
 ## Experiments
 
