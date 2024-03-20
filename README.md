@@ -27,14 +27,14 @@ Parameters and options:
 1. `--algorithm`: options - `['nll', 'wbc', 'r_gold', 'r_lol', 'a_lol', 'a_lol_ref_free', 'a_lol_seq', 'a_lol_kl']`
 2. `--sampling_strategy`: default `None`. Option `good_priority` to be used with Advantage or Reward based Offline RL 
 3. `--ppo_clip`: default `0.9`. PPO clip parameter for R-LoL, A-LoL and A-LoL seq
-4. `--kl_beta`: default `0.2`. KL beta parameter for A-LoL KL
+4. `--kl_beta`: default `0.0`. KL beta parameter for A-LoL KL. When KL is used make sure to set ppo_clip to 0.0
 
 **How to train models with Preference-based Offline RL methods?**  
 1. DPO: `python dpo_qlora_llama_hh.py --output_dir "./checkpoints/dpo_qlora_llama/"`. Add `--reference_free` to test the reference-free version of DPO.  
 2. PRO: `python pro_qlora_llama_hh.py --output_dir "./checkpoints/pro_qlora_llama/"`
 
 **How to train models with Online RL methods?**
-1. PPO: `python ppo_qlora_llama_hh.py --output_dir "checkpoints/ppo_timdettmers_qlora_llama_3e/" --cache_dir "cache/ppo_tim_cache" --total_steps 3000`  
+1. PPO: `python ppo_qlora_llama_hh.py --output_dir "checkpoints/ppo_timdettmers_qlora_llama_6e/" --cache_dir "cache/ppo_tim_cache" --total_steps 6000`  
 2. Evaluate existing PPO checkpoint: `python ppo_hh_eval.py --model_name_or_path "reciprocate/ppo_hh_pythia-6B" --output_dir "checkpoints/ppo_hh_pythia_6B/"`
 
 **How to evaluate any QLoRA model on test set?**  
