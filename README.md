@@ -121,14 +121,14 @@ ALGORITHM options: `["nll", "wbc", "r_gold", "r_lol",  "a_lol", "a_lol_ref_free"
 `python aggregate_generation_task_results.py -bmps "{'dgpt_nll': True}" -tn [TASK_NAME] -o final_results/[TASK_NAME]_final_results.csv`  
 TASK_NAME options: `["wow", "faithdial", "faithdial_wow"]`  
 
-paper: https://arxiv.org/abs/2305.14718
+paper: https://openreview.net/pdf?id=ZDGKPbF0VQ
 ```
-@misc{baheti2023improving,
-      title={Improving Language Models with Advantage-based Offline Policy Gradients}, 
-      author={Ashutosh Baheti and Ximing Lu and Faeze Brahman and Ronan Le Bras and Maarten Sap and Mark Riedl},
-      year={2023},
-      eprint={2305.14718},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL}
+@inproceedings{
+baheti2024improving,
+title={Improving Language Models with Advantage-based Offline Policy Gradients},
+author={Ashutosh Baheti and Ximing Lu and Faeze Brahman and Ronan Le Bras and Maarten Sap and Mark Riedl},
+booktitle={The Twelfth International Conference on Learning Representations},
+year={2024},
+url={https://openreview.net/forum?id=ZDGKPbF0VQ}
 }
 ```
